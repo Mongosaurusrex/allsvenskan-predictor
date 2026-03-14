@@ -1,0 +1,2 @@
+matches_path: data/01_raw/swedish_leagues_2011_2025_clean.csv
+fixtures_path: data/01_raw/upcoming_fixtures.csv
