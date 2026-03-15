@@ -14,7 +14,6 @@ data/**
 
 # except their sub-folders
 !data/**/
-!data/07_model_output/predictions.json
 
 # also keep all .gitkeep files
 !.gitkeep
