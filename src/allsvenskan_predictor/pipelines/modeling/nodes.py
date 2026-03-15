@@ -3,8 +3,12 @@ import numpy as np
 import json
 
 from cmdstanpy import CmdStanModel
-from scipy.stats import skellam
+from scipy.stats import skellam, poisson
 
+
+# ---------------------------------------------------------
+# DATA LOADING
+# ---------------------------------------------------------
 
 def load_matches(filepath) -> pl.DataFrame:
 
@@ -21,6 +25,10 @@ def filter_se1_matches(df) -> pl.DataFrame:
 
     return df.filter(pl.col("league") == "SE1")
 
+
+# ---------------------------------------------------------
+# FEATURE ENGINEERING
+# ---------------------------------------------------------
 
 def add_time_decay(df, xi=0.3) -> pl.DataFrame:
 
@@ -39,6 +47,10 @@ def add_time_decay(df, xi=0.3) -> pl.DataFrame:
 
     return df
 
+
+# ---------------------------------------------------------
+# TEAM MAPPING
+# ---------------------------------------------------------
 
 def create_team_mapping(df):
 
@@ -70,6 +82,10 @@ def create_team_mapping(df):
     return df, team_to_id
 
 
+# ---------------------------------------------------------
+# STAN DATA
+# ---------------------------------------------------------
+
 def build_stan_data(df, team_to_id):
 
     stan_data = {
@@ -89,6 +105,10 @@ def build_stan_data(df, team_to_id):
     return stan_data
 
 
+# ---------------------------------------------------------
+# MODEL TRAINING
+# ---------------------------------------------------------
+
 def train_model(stan_data):
 
     model = CmdStanModel(
@@ -106,6 +126,10 @@ def train_model(stan_data):
 
     return fit
 
+
+# ---------------------------------------------------------
+# FIXTURES
+# ---------------------------------------------------------
 
 def load_fixtures(filepath):
 
@@ -145,6 +169,28 @@ def map_fixture_teams(fixtures, team_map):
     return fixtures
 
 
+# ---------------------------------------------------------
+# SCORELINE DISTRIBUTION
+# ---------------------------------------------------------
+
+def scoreline_table(lambda_home, lambda_away, max_goals=6):
+
+    table = {}
+
+    for h in range(max_goals + 1):
+        for a in range(max_goals + 1):
+
+            p = poisson.pmf(h, lambda_home) * poisson.pmf(a, lambda_away)
+
+            table[f"{h}-{a}"] = float(p)
+
+    return table
+
+
+# ---------------------------------------------------------
+# PREDICTIONS
+# ---------------------------------------------------------
+
 def generate_predictions(fit, fixtures):
 
     attack = fit.stan_variable("attack")
@@ -166,9 +212,26 @@ def generate_predictions(fit, fixtures):
             attack[:, a] - defense[:, h]
         )
 
+        lambda_home = lambda_home.mean()
+        lambda_away = lambda_away.mean()
+
         p_home = 1 - skellam.cdf(0, lambda_home, lambda_away)
         p_draw = skellam.pmf(0, lambda_home, lambda_away)
         p_away = skellam.cdf(-1, lambda_home, lambda_away)
+
+        competition_format = row.get("competition_format", "league")
+
+        if competition_format == "knockout":
+
+            p_home_advance = p_home + 0.5 * p_draw
+            p_away_advance = p_away + 0.5 * p_draw
+
+        else:
+
+            p_home_advance = None
+            p_away_advance = None
+
+        scorelines = scoreline_table(lambda_home, lambda_away)
 
         predictions.append({
 
@@ -176,16 +239,27 @@ def generate_predictions(fit, fixtures):
             "home_team": row["home_team"],
             "away_team": row["away_team"],
 
-            "lambda_home": float(lambda_home.mean()),
-            "lambda_away": float(lambda_away.mean()),
+            "competition_format": competition_format,
 
-            "p_home": float(p_home.mean()),
-            "p_draw": float(p_draw.mean()),
-            "p_away": float(p_away.mean())
+            "lambda_home": float(lambda_home),
+            "lambda_away": float(lambda_away),
+
+            "p_home_win": float(p_home),
+            "p_draw": float(p_draw),
+            "p_away_win": float(p_away),
+
+            "p_home_advance": None if p_home_advance is None else float(p_home_advance),
+            "p_away_advance": None if p_away_advance is None else float(p_away_advance),
+
+            "scoreline_probs": scorelines
         })
 
     return predictions
 
+
+# ---------------------------------------------------------
+# EXPORT
+# ---------------------------------------------------------
 
 def export_artifacts(predictions):
 
