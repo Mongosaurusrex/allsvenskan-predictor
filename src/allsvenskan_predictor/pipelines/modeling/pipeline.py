@@ -6,6 +6,7 @@ from .nodes import (
     add_time_decay,
     create_team_mapping,
     build_stan_data,
+    publish_to_docs,
     train_model,
     load_fixtures,
     map_fixture_teams,
@@ -77,4 +78,9 @@ def create_pipeline() -> Pipeline:
             inputs="predictions",
             outputs="artifacts_written",
         ),
+        node(
+            publish_to_docs,
+            inputs=["predictions"],
+            outputs=None,
+        )
     ])

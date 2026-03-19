@@ -1,6 +1,8 @@
 import polars as pl
 import numpy as np
 import json
+import shutil
+from pathlib import Path
 
 from cmdstanpy import CmdStanModel
 from scipy.stats import skellam, poisson
@@ -144,24 +146,22 @@ def load_fixtures(filepath):
 
 def map_fixture_teams(fixtures, team_map):
 
+    # Optional: log missing teams (but don't crash)
     missing_home = set(fixtures["home_team"]) - set(team_map.keys())
     missing_away = set(fixtures["away_team"]) - set(team_map.keys())
-
     missing = missing_home.union(missing_away)
 
     if missing:
-        raise ValueError(
-            f"Unknown teams in fixtures not present in training data: {missing}"
-        )
+        print(f"[WARNING] Unknown teams encountered: {missing}")
 
     fixtures = fixtures.with_columns([
 
         pl.col("home_team")
-        .map_elements(lambda x: team_map[x], return_dtype=pl.Int32)
+        .map_elements(lambda x: team_map.get(x), return_dtype=pl.Int32)
         .alias("home_id"),
 
         pl.col("away_team")
-        .map_elements(lambda x: team_map[x], return_dtype=pl.Int32)
+        .map_elements(lambda x: team_map.get(x), return_dtype=pl.Int32)
         .alias("away_id")
 
     ])
@@ -197,62 +197,104 @@ def generate_predictions(fit, fixtures):
     defense = fit.stan_variable("defense")
     gamma = fit.stan_variable("gamma")
 
+    draws = gamma.shape[0]
+
     predictions = []
 
     for row in fixtures.iter_rows(named=True):
 
-        h = row["home_id"] - 1
-        a = row["away_id"] - 1
+        h_id = row["home_id"]
+        a_id = row["away_id"]
 
-        lambda_home = np.exp(
-            attack[:, h] - defense[:, a] + gamma
-        )
+        unknown_home = h_id is None
+        unknown_away = a_id is None
 
-        lambda_away = np.exp(
-            attack[:, a] - defense[:, h]
-        )
+        unknown_team = unknown_home or unknown_away
 
-        lambda_home = lambda_home.mean()
-        lambda_away = lambda_away.mean()
+        # ---- Handle UNKNOWN TEAMS ----
+        if unknown_home:
+            attack_h = np.zeros(draws)
+            defense_h = np.zeros(draws)
+        else:
+            h = h_id - 1
+            attack_h = attack[:, h]
+            defense_h = defense[:, h]
 
+        if unknown_away:
+            attack_a = np.zeros(draws)
+            defense_a = np.zeros(draws)
+        else:
+            a = a_id - 1
+            attack_a = attack[:, a]
+            defense_a = defense[:, a]
+
+        # ---- Expected goals ----
+        lambda_home = np.exp(attack_h - defense_a + gamma)
+        lambda_away = np.exp(attack_a - defense_h)
+
+        lambda_home_mean = float(lambda_home.mean())
+        lambda_away_mean = float(lambda_away.mean())
+
+        # ---- Outcome probabilities ----
         p_home = 1 - skellam.cdf(0, lambda_home, lambda_away)
         p_draw = skellam.pmf(0, lambda_home, lambda_away)
         p_away = skellam.cdf(-1, lambda_home, lambda_away)
 
-        competition_format = row.get("competition_format", "league")
+        p_home_mean = float(p_home.mean())
+        p_draw_mean = float(p_draw.mean())
+        p_away_mean = float(p_away.mean())
 
-        if competition_format == "knockout":
+        # ---- Scoreline probabilities ----
+        max_goals = 6
+        score_probs = {}
 
-            p_home_advance = p_home + 0.5 * p_draw
-            p_away_advance = p_away + 0.5 * p_draw
+        for i in range(max_goals + 1):
+            for j in range(max_goals + 1):
 
-        else:
+                p_ij = (
+                    poisson.pmf(i, lambda_home)
+                    * poisson.pmf(j, lambda_away)
+                )
 
-            p_home_advance = None
-            p_away_advance = None
+                score_probs[f"{i}-{j}"] = float(p_ij.mean())
 
-        scorelines = scoreline_table(lambda_home, lambda_away)
-
-        predictions.append({
-
+        # ---- Base output ----
+        output = {
             "date": str(row["date"]),
             "home_team": row["home_team"],
             "away_team": row["away_team"],
+            "lambda_home": lambda_home_mean,
+            "lambda_away": lambda_away_mean,
+            "scoreline_probs": score_probs,
+            "unknown_team": unknown_team,
+            "unknown_home": unknown_home,
+            "unknown_away": unknown_away,
+        }
 
-            "competition_format": competition_format,
+        # ---- Competition logic ----
+        if row.get("competition_format") == "knockout":
 
-            "lambda_home": float(lambda_home),
-            "lambda_away": float(lambda_away),
+            p_home_adv = p_home_mean + 0.5 * p_draw_mean
+            p_away_adv = p_away_mean + 0.5 * p_draw_mean
 
-            "p_home_win": float(p_home),
-            "p_draw": float(p_draw),
-            "p_away_win": float(p_away),
+            output.update({
+                "competition_format": "knockout",
+                "p_home_win": p_home_mean,
+                "p_draw": p_draw_mean,
+                "p_away_win": p_away_mean,
+                "p_home_advance": float(p_home_adv),
+                "p_away_advance": float(p_away_adv),
+            })
 
-            "p_home_advance": None if p_home_advance is None else float(p_home_advance),
-            "p_away_advance": None if p_away_advance is None else float(p_away_advance),
+        else:
+            output.update({
+                "competition_format": "league",
+                "p_home_win": p_home_mean,
+                "p_draw": p_draw_mean,
+                "p_away_win": p_away_mean,
+            })
 
-            "scoreline_probs": scorelines
-        })
+        predictions.append(output)
 
     return predictions
 
@@ -267,3 +309,22 @@ def export_artifacts(predictions):
         json.dump(predictions, f, indent=2)
 
     return True
+
+
+def publish_to_docs(predictions):
+
+    output_dir = Path("data/07_model_output")
+    docs_dir = Path("docs")
+
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Source files ----
+    pred_src = output_dir / "predictions.json"
+
+    # ---- Destination ----
+    pred_dst = docs_dir / "predictions.json"
+
+    # ---- Copy ----
+    shutil.copy(pred_src, pred_dst)
+
+    return None
