@@ -1,2 +1,7 @@
 matches_path: data/01_raw/swedish_leagues_2011_2025_clean.csv
 fixtures_path: data/01_raw/upcoming_fixtures.csv
+target_season: 2026
+target_league: SE1
+n_simulations: 5000
+random_seed: 42
+relegation_spots: 3

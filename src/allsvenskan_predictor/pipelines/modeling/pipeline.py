@@ -9,9 +9,13 @@ from .nodes import (
     publish_to_docs,
     train_model,
     load_fixtures,
+    validate_fixtures,
     map_fixture_teams,
+    select_coming_round_fixtures,
     generate_predictions,
-    export_artifacts,
+    generate_seasonal_predictions,
+    export_coming_predictions,
+    export_seasonal_predictions,
 )
 
 
@@ -58,6 +62,12 @@ def create_pipeline() -> Pipeline:
         node(
             load_fixtures,
             inputs="params:fixtures_path",
+            outputs="fixtures_raw",
+        ),
+
+        node(
+            validate_fixtures,
+            inputs=["fixtures_raw", "params:target_season", "params:target_league"],
             outputs="fixtures",
         ),
 
@@ -68,19 +78,47 @@ def create_pipeline() -> Pipeline:
         ),
 
         node(
-            generate_predictions,
-            inputs=["model_fit", "mapped_fixtures"],
-            outputs="predictions",
+            select_coming_round_fixtures,
+            inputs="mapped_fixtures",
+            outputs="coming_fixtures",
         ),
 
         node(
-            export_artifacts,
-            inputs="predictions",
-            outputs="artifacts_written",
+            generate_predictions,
+            inputs=["model_fit", "coming_fixtures"],
+            outputs="coming_predictions",
         ),
+
+        node(
+            generate_seasonal_predictions,
+            inputs=[
+                "model_fit",
+                "mapped_fixtures",
+                "matches",
+                "params:target_season",
+                "params:target_league",
+                "params:n_simulations",
+                "params:random_seed",
+                "params:relegation_spots",
+            ],
+            outputs="seasonal_predictions",
+        ),
+
+        node(
+            export_coming_predictions,
+            inputs="coming_predictions",
+            outputs="coming_artifacts_written",
+        ),
+
+        node(
+            export_seasonal_predictions,
+            inputs="seasonal_predictions",
+            outputs="seasonal_artifacts_written",
+        ),
+
         node(
             publish_to_docs,
-            inputs=["predictions"],
+            inputs=["coming_predictions", "seasonal_predictions"],
             outputs=None,
         )
     ])
