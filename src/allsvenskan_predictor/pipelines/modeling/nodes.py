@@ -43,18 +43,39 @@ def filter_se1_matches(df) -> pl.DataFrame:
 # FEATURE ENGINEERING
 # ---------------------------------------------------------
 
-def add_time_decay(df, xi=0.7) -> pl.DataFrame:
+def add_time_decay(
+    df,
+    full_weight_days=180,
+    post_cutoff_half_life_days=45,
+) -> pl.DataFrame:
+
+    full_weight_days = int(full_weight_days)
+    post_cutoff_half_life_days = float(post_cutoff_half_life_days)
+
+    if full_weight_days < 0:
+        raise ValueError("full_weight_days must be >= 0")
+
+    if post_cutoff_half_life_days <= 0:
+        raise ValueError("post_cutoff_half_life_days must be > 0")
 
     latest_date = df.select(pl.col("date").max()).item()
+    decay_rate = -np.log(2) / post_cutoff_half_life_days
 
     df = df.with_columns(
-        ((latest_date - pl.col("date")).dt.total_days() / 365)
-        .alias("age_years")
+        (latest_date - pl.col("date")).dt.total_days().cast(pl.Float64)
+        .alias("age_days")
     )
 
     df = df.with_columns(
-        pl.col("age_years")
-        .map_elements(lambda x: np.exp(-xi * x))
+        (pl.col("age_days") - full_weight_days)
+        .clip(lower_bound=0.0)
+        .alias("days_past_cutoff")
+    )
+
+    df = df.with_columns(
+        pl.when(pl.col("age_days") <= full_weight_days)
+        .then(pl.lit(1.0))
+        .otherwise((pl.col("days_past_cutoff") * decay_rate).exp())
         .alias("weight")
     )
 
@@ -167,7 +188,7 @@ def validate_fixtures(fixtures, target_season, target_league):
     filtered = fixtures.filter(
         (pl.col("season") == target_season)
         & (pl.col("league") == target_league)
-        & (pl.col("competition_format") == "league")
+        & pl.col("competition_format").is_in(["league", "knockout"])
     )
 
     if filtered.is_empty():
@@ -184,6 +205,7 @@ def validate_fixtures(fixtures, target_season, target_league):
         "date",
         "home_team",
         "away_team",
+        "competition_format",
         "round",
     ]).is_duplicated()
 
@@ -427,6 +449,8 @@ def generate_seasonal_predictions(
     random_seed,
     relegation_spots,
 ):
+
+    fixtures = fixtures.filter(pl.col("competition_format") == "league")
 
     unknown = fixtures.filter(
         pl.col("home_id").is_null() | pl.col("away_id").is_null()

@@ -37,7 +37,11 @@ def create_pipeline() -> Pipeline:
 
         node(
             add_time_decay,
-            inputs="se1_matches",
+            inputs=[
+                "se1_matches",
+                "params:full_weight_days",
+                "params:post_cutoff_half_life_days",
+            ],
             outputs="weighted_matches",
         ),
 
