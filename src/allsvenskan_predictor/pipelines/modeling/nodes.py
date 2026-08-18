@@ -3,6 +3,7 @@ import numpy as np
 import json
 import shutil
 from pathlib import Path
+from time import monotonic
 
 from cmdstanpy import CmdStanModel
 from scipy.stats import skellam, poisson
@@ -17,6 +18,23 @@ REQUIRED_FIXTURE_COLUMNS = {
     "competition_format",
     "round",
 }
+
+
+def _print_progress(current: int, total: int, label: str, width: int = 30) -> None:
+
+    if total <= 0:
+        return
+
+    progress = min(max(current / total, 0.0), 1.0)
+    filled = int(width * progress)
+    bar = "#" * filled + "." * (width - filled)
+    ending = "\n" if current >= total else "\r"
+
+    print(
+        f"{label}: [{bar}] {current}/{total} ({progress:.0%})",
+        end=ending,
+        flush=True,
+    )
 
 
 # ---------------------------------------------------------
@@ -495,8 +513,12 @@ def generate_seasonal_predictions(
     n_teams = len(teams)
     position_counts = {team: np.zeros(n_teams, dtype=np.int32) for team in teams}
     points_samples = {team: [] for team in teams}
+    progress_interval = max(1, n_simulations // 100)
+    last_progress_update = monotonic()
 
-    for _ in range(n_simulations):
+    _print_progress(0, n_simulations, "Seasonal predictions")
+
+    for simulation_idx in range(n_simulations):
         standings = {team: stats.copy() for team, stats in base_standings.items()}
 
         for row in fixtures_sorted.iter_rows(named=True):
@@ -530,6 +552,17 @@ def generate_seasonal_predictions(
 
         for team in teams:
             points_samples[team].append(standings[team]["points"])
+
+        completed = simulation_idx + 1
+        now = monotonic()
+
+        if (
+            completed == n_simulations
+            or completed % progress_interval == 0
+            or now - last_progress_update >= 1.0
+        ):
+            _print_progress(completed, n_simulations, "Seasonal predictions")
+            last_progress_update = now
 
     team_summaries = []
     relegation_spots = min(relegation_spots, n_teams)
